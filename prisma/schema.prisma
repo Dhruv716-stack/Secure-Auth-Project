@@ -1,0 +1,148 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id               String          @id @default(cuid())
+  customerId       String          @unique @map("customer_id")
+  email            String          @unique
+  passwordHash     String          @map("password_hash")
+  name             String
+  phone            String?
+  accountType      String          @default("savings") @map("account_type")
+  isActive         Boolean         @default(true) @map("is_active")
+  lastLogin        DateTime?       @map("last_login")
+  createdAt        DateTime        @default(now()) @map("created_at")
+  updatedAt        DateTime        @updatedAt @map("updated_at")
+  profileImage     String?         @map("profile_image")
+  hasTypingPattern Boolean         @default(false) @map("has_typing_pattern")
+  authActivities   AuthActivity[]
+  notifications    Notification[]
+  cursorData       CursorData[]
+  sessions         Session[]
+  transactions     Transaction[]
+  typingPatterns   TypingPattern[]
+
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  token     String   @unique
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model TypingPattern {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  pattern   String
+  quality   Float
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  type      String   @default("manual")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("typing_patterns")
+}
+
+model Transaction {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  type        String
+  amount      Decimal  @db.Decimal(10, 2)
+  description String?
+  recipientId String?  @map("recipient_id")
+  status      String   @default("pending")
+  createdAt   DateTime @default(now()) @map("created_at")
+  ip          String
+  location    String
+  customerId  String?  @map("customer_id")
+  device      String?
+  lat         Float?
+  lng         Float?
+  category    String?
+  sessionId   String?  @map("session_id")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("transactions")
+}
+
+model CursorData {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  x           Int
+  y           Int
+  timestamp   DateTime @default(now())
+  sessionId   String?  @map("session_id")
+  page        String?
+  action      String?
+  cursorArray Json?    @map("cursor_array")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("cursor_data")
+}
+
+model modelInput {
+  id                 Int      @id @default(autoincrement())
+  customer_id        String
+  session_id         String
+  device_type        String
+  click_events       Int
+  scroll_events      Int
+  touch_events       Int
+  keyboard_events    Int
+  device_motion      Float
+  time_on_page       Int
+  screen_size        String
+  browser_info       String
+  language           String
+  timezone_offset    Int
+  device_orientation String
+  geolocation_city   String
+  transaction_amount Float
+  transaction_date   DateTime
+  mouse_movement     Int
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  type      String
+  message   String
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id])
+}
+
+model AuthActivity {
+  id         String   @id @default(uuid())
+  userId     String?
+  customerId String?
+  type       String
+  status     String
+  device     String?
+  ip         String?
+  location   String?
+  createdAt  DateTime @default(now())
+  user       User?    @relation(fields: [userId], references: [id])
+}
+
+model modelOutput {
+  id           String   @id @default(cuid())
+  customerId   String
+  sessionId    String
+  anomalyScore Float
+  riskCategory String
+  riskReasons  String
+  createdAt    DateTime @default(now())
+}

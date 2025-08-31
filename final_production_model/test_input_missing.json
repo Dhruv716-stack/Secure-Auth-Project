@@ -1,0 +1,16 @@
+{
+  "user_id": "user_123",
+  "session_id": "session_456",
+  "device_type": "Mobile",
+  "click_events": 35,
+  "touch_events": 25,
+  "device_motion": 3.5,
+  "screen_size": "360x640",
+  "browser_info": "Chrome",
+  "language": "english",
+  "timezone_offset": 330,
+  "device_orientation": "portrait",
+  "geolocation_city": "Delhi",
+  "transaction_amount": 12000,
+  "transaction_date": "2025-04-18 02:00:00"
+}

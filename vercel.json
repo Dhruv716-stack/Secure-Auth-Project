@@ -1,0 +1,8 @@
+{
+    "cron": [
+        {
+            "path": "/api/run-batch-model",
+            "schedule": "*/10 * * * * *"
+        }
+    ]
+}
