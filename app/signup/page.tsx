@@ -116,7 +116,7 @@ export default function SignUpPage() {
         }),
       })
       const data = await res.json()
-      if (!res.ok) throw new Error(data.message || "Signup failed")
+      if (!res.ok) throw new Error(data.error || data.message || "Signup failed")
       
       // After successful signup, automatically log in
       setSuccess("Registration successful! Logging you in...")
