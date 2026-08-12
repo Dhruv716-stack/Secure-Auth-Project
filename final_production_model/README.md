@@ -1,169 +1,173 @@
-# Anomaly Detection Production Model — Documentation
+# Fraud Detection Model
 
-## Overview
-This folder contains a fully production-ready anomaly detection pipeline based on a Random Forest model. It includes all code, model artifacts, preprocessing pipeline, imputation logic, datasets, and evaluation results needed for robust, reproducible, and portable deployment.
+A behavioral-anomaly judge model (Random Forest) that scores banking sessions
+for fraud risk. Trained on realistic synthetic data (~1.7% anomaly rate, six
+fraud personas), evaluated on a genuinely separate, leak-checked held-out
+test set.
 
----
+**Current production performance** (see `evaluation/evaluate_judge.py`):
 
-## Requirements
-- **Python 3.8+** (recommended)
-- **pip** (for installing dependencies)
+| Metric | Value |
+|---|---|
+| Recall | 82.5% (33/40 fraud cases caught) |
+| Precision | 75.0% |
+| PR-AUC | 0.835 (41.8x random baseline) |
 
-### Python Packages
-All required packages are listed in `requirements.txt`:
-- pandas
-- numpy
-- scikit-learn
+## Folder structure
 
-Install with:
-```bash
-pip install -r requirements.txt
+```
+production/     The live, deployed model -- what app/api/transactions
+                 actually calls. Nothing else in this repo should be
+                 imported by the running app.
+training/       Scripts to regenerate training data and retrain the model.
+evaluation/     Scripts to honestly evaluate the production model against
+                 held-out data.
+data/
+  train/         The current training set.
+  test/          The current held-out test set (verified zero overlap
+                 with training -- see training/generate_final_honest_test.py).
+archive/        Superseded models and exploratory work, kept as evidence,
+                 not deleted. See "Archive" section below.
 ```
 
----
+## Quick start
 
-## Environment Setup (Recommended)
-1. **Create a virtual environment:**
-   ```bash
-   python -m venv env
-   source env/bin/activate  # On Windows: env\Scripts\activate
-   ```
-2. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
----
-
-## Input Requirements
-The model expects input data as a Python dictionary (or JSON) with the following fields (all other columns are ignored):
-
-- device_type
-- click_events
-- scroll_events
-- touch_events
-- keyboard_events
-- device_motion
-- time_on_page
-- screen_size
-- browser_info
-- language
-- timezone_offset
-- device_orientation
-- geolocation_city
-- transaction_amount
-- mouse_movement
-
-**The following features are automatically derived and used by the model:**
-- obvious_anomaly_flag
-- clicks_per_sec
-- scrolls_per_sec
-- touches_per_sec
-- keyboard_per_sec
-- interaction_score
-- is_odd_hour
-- is_large_transaction
-- is_short_session
-- interaction_diversity
-- behavioural_consistency
-- input_to_navigation_ratio
-- active_to_passive_ratio
-- session_complexity
-- transaction_per_min
-- is_high_value_short_session
-- is_small_screen
-- is_large_screen
-
-**Do not include user_id or session_id in your input.**
-
-Missing values are handled automatically using mean/mode imputation (see below).
-
----
-
-## How to Use the Model and Pipeline
-
-### 1. **Single Prediction (from Python)**
-```python
-import pickle
-import pandas as pd
-import numpy as np
-
-# Load artifacts
-with open('rf_model.pkl', 'rb') as f:
-    model = pickle.load(f)
-with open('scaler.pkl', 'rb') as f:
-    scaler = pickle.load(f)
-with open('label_encoders.pkl', 'rb') as f:
-    label_encoders = pickle.load(f)
-with open('feature_cols.pkl', 'rb') as f:
-    feature_cols = pickle.load(f)
-with open('imputation_values.pkl', 'rb') as f:
-    imputation_values = pickle.load(f)
-
-def preprocess_input(input_dict):
-    df = pd.DataFrame([input_dict])
-    # Impute missing values
-    for col, val in imputation_values.items():
-        if col not in df.columns or pd.isnull(df.at[0, col]):
-            df[col] = val
-    # ... (add flag_obvious_anomalies, encode categoricals, scale, as in predict.py)
-    # See predict.py for full logic
-    return X_scaled, df
-
-# Use the predict() function from predict.py for full pipeline
-```
-
-### 2. **Command Line Prediction**
-Prepare your input as a JSON file (see `test_input_missing.json` for an example):
+**Score a single session:**
 ```bash
+cd production
 python predict.py input.json
 ```
+`input.json` must contain the 15 raw fields listed in "Input schema" below.
 
-### 3. **Integration in Other Backends**
-- Load all artifacts once at server startup.
-- For each request, preprocess input as above and call the model for prediction.
-- Return the output (predicted_label, anomaly_score, risk_level, risk_reason) as your API response.
+**Score a batch:**
+```bash
+cd production
+python predict_batch.py batch_input.json   # a JSON array of session objects
+```
 
----
+**Retrain from scratch:**
+```bash
+cd training
+python generate_training_data.py       # regenerates data/train/train.csv
+python generate_final_honest_test.py   # regenerates data/test/final_honest_test.csv
+python train_judge_model.py            # trains, prints CV + leak-guard results, saves .pkl artifacts here
+# copy the six output .pkl files into ../production/, stripping the _v2 suffix
+```
+
+**Evaluate the deployed model:**
+```bash
+cd evaluation
+python evaluate_judge.py
+```
+
+## Input schema
+
+Matches what the web app's behavioral-tracking hook already collects
+(`hooks/useSessionBatch.ts` in the main project) -- no new fields required:
+
+```
+device_type, click_events, scroll_events, touch_events, keyboard_events,
+device_motion, time_on_page, screen_size, browser_info, language,
+timezone_offset, device_orientation, geolocation_city,
+transaction_amount, transaction_date, mouse_movement
+```
+
+`predict()` also accepts an optional `user_history` argument (a list of the
+user's recent past sessions) to compute per-user baseline-deviation features
+(is this a new device/city/browser for this user, does the typing/click
+rhythm match their own history). **This is not yet wired up in the live app**
+-- `app/api/transactions/route.ts` only sends the current session. Until
+that integration lands, these features safely degrade to "no deviation
+detected" rather than crashing or guessing. See `production/predict.py`'s
+docstring for the exact mechanism.
 
 ## Output
-For each input, the model returns:
-- `predicted_label`: 0 (normal) or 1 (anomaly)
-- `anomaly_score`: probability of anomaly
-- `risk_level`: Low, Medium, or High
-- `risk_reason`: brief explanation for Medium/High risk
 
----
-
-## Retraining or Updating the Model
-To retrain or update the model with new data:
-```bash
-python export_rf_production_model.py
+```json
+{
+  "predicted_label": 0 or 1,
+  "anomaly_score": 0.0-1.0,
+  "risk_level": "Low" | "Medium" | "High",
+  "risk_reason": "..."
+}
 ```
-This will regenerate all artifacts using the latest training data and logic.
 
----
+## Design decisions worth knowing before changing anything
 
-## Datasets and Results
-- All datasets used for training and testing are included for reproducibility.
-- The best evaluation results are in `realistic_model_results.csv`.
+**Why judge-only, not judge + heuristic + spotter.** Earlier iterations
+combined this model with a hand-written rule-based heuristic and a second,
+unsupervised model (Isolation Forest). Both were tested honestly and
+removed:
+- The heuristic caught zero fraud cases the judge didn't already catch,
+  while adding 11 extra false alarms on the final test set. Purely harmful.
+- The spotter had one real, proven strength (unusually short/rushed
+  sessions) that the judge's own features now cover after retraining; its
+  other four tested fraud patterns showed weak or no independent value,
+  not worth the ongoing cost of maintaining a second model/pipeline.
 
----
+See `archive/spotter_unsupervised/` and `archive/exploratory_tests/` for the
+full evaluation evidence behind this call, not just the conclusion.
 
-## Imputation Logic
-- **Numerical features:** Imputed with mean (or 0 for counts)
-- **Categorical features:** Imputed with mode (most frequent value)
-- Imputation values are saved in `imputation_values.pkl` and used automatically.
+**Why `obvious_anomaly_flag` doesn't exist anywhere in this pipeline.** The
+original model (`archive/v1_original_leaky_model/`) computed a rule-based
+"obvious anomaly" flag and used it BOTH to generate training labels AND as a
+model input feature -- a direct data leak (the model was largely
+re-deriving its own answer key). Caught by re-running the original
+evaluation script live and finding the reported metrics didn't reproduce
+honestly. Never reintroduce a feature that was also used to generate the
+label it predicts.
 
----
+**Why cross-validation is grouped by `user_id`, not by row.** Per-user
+baseline features (is this a new device for this user, etc.) are computed
+from a user's OTHER sessions. Random row-level fold splitting can put one
+user's sessions on both sides of a fold boundary, letting information leak
+across the boundary indirectly. `train_judge_model.py` uses
+`StratifiedGroupKFold` / `GroupShuffleSplit` and asserts zero user overlap
+between splits every time it runs -- don't switch back to plain
+`StratifiedKFold` / `train_test_split` without re-deriving why this matters.
 
-## Notes for Production Use
-- The folder is fully self-contained and portable.
-- All preprocessing, imputation, and risk logic is included in `predict.py`.
-- You can integrate the logic into any Python backend (Flask, FastAPI, Django, etc.)
-- For batch scoring, simply loop over your data and call the prediction pipeline.
+**Why the decision threshold (0.40) is a manual override, not the
+auto-tuned value.** The auto-tuner (F2-score, recall-weighted) picks a much
+lower threshold that trades significant precision for marginal extra
+recall. 0.40 was chosen after reviewing the full precision/recall-vs-
+threshold curve as the better cost/benefit point (see git history /
+conversation log for the full sweep). This is a product decision (cost of a
+missed fraud vs. cost of a false alarm), not something to silently
+re-optimize -- see the `MANUAL_THRESHOLD_OVERRIDE` comment in
+`training/train_judge_model.py`.
 
----
+## Known gaps (honest, not hidden)
 
-## Support
-For questions, integration help, or further customization, see the main project README or contact the author. 
+- **Per-user history isn't wired into the live app yet** (see "Input
+  schema" above) -- the model's proven 82.5% recall requires it.
+- **Mule account networks are NOT detectable by this model.** That fraud
+  pattern requires cross-account, over-time analysis; every feature here is
+  scoped to a single session. Would need a different kind of model
+  (account-level or graph-based), not more training data.
+- **Trained entirely on synthetic data.** No real confirmed-fraud feedback
+  loop exists yet. See the retraining note below.
+
+## Retraining as real data arrives
+
+`data/modelInput`-style behavioral data is already collected by the live
+app, but nothing currently records whether a flagged session was confirmed
+fraud or a false alarm -- that confirmed-label signal is what real
+retraining needs, not just more raw sessions. Until that feedback loop
+exists, treat this model as a synthetic-data-trained starting point, not a
+system that improves itself automatically.
+
+## Archive
+
+- `archive/v1_original_leaky_model/` -- the original model, kept as
+  evidence of the label-leak bug and what NOT to do (feeding a rule-derived
+  flag back in as both the label source and a training feature).
+- `archive/spotter_unsupervised/` -- the unsupervised Isolation Forest
+  "spotter" model and its full evaluation trail (label-free sanity checks,
+  labeled grading, the 5-pattern acceptance suite). Retired from production
+  but its PR-curve and persona-level results are worth reading before
+  reconsidering an unsupervised layer in the future.
+- `archive/exploratory_tests/` -- one-off synthetic test patterns built to
+  probe specific questions (novel/untrained fraud shapes, ATO/Zelle and RAT
+  fraud variants, the spotter's 5-pattern acceptance suite). Not part of
+  the regular train/eval loop, but each file's docstring explains exactly
+  what question it was built to answer.
