@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createUser, generateJWT, createSession } from '@/lib/auth'
-import { spawn } from 'child_process';
 
 export async function POST(req: NextRequest) {
   try {
@@ -105,8 +104,10 @@ export async function POST(req: NextRequest) {
       maxAge: 24 * 60 * 60 // 24 hours
     })
 
-    // Spawn the batch worker script in the background
-    spawn('node', ['scripts/batch_model_cron_v2.js'], { detached: true, stdio: 'ignore' });
+    // The batch worker runs as its own long-lived process, started
+    // alongside the server (`npm run batch`). It must not be spawned from
+    // a request handler: `detached` daemons outlive the server, nothing
+    // ever reaps them, and every signup would start another one.
 
     return response
 

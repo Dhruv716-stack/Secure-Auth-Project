@@ -28,3 +28,7 @@ next-env.d.ts
 # python
 __pycache__/
 *.pyc
+
+# transient model IO
+final_production_model/production/batch_input.json
+final_production_model/production/single_input.json
