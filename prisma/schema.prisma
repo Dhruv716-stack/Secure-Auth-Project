@@ -72,6 +72,11 @@ model Transaction {
   lng         Float?
   category    String?
   sessionId   String?  @map("session_id")
+  // Risk scoring from the fraud model. Null until scored, or if the
+  // model was unavailable at transaction time.
+  riskLevel    String? @map("risk_level")
+  riskReason   String? @map("risk_reason")
+  anomalyScore Float?  @map("anomaly_score")
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("transactions")
@@ -112,6 +117,9 @@ model modelInput {
   transaction_amount Float
   transaction_date   DateTime
   mouse_movement     Int
+  // Ground-truth training target. Null for live inference data, which
+  // has no label at collection time.
+  label              Int?
 }
 
 model Notification {

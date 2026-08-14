@@ -27,19 +27,29 @@ export async function POST(req: NextRequest) {
         }];
         const input = rawInput;
         // Write input to temp file
-        const inputPath = path.join(process.cwd(), 'final_production_model', 'single_input.json');
+        const inputPath = path.join(process.cwd(), 'final_production_model', 'production', 'single_input.json');
         fs.writeFileSync(inputPath, JSON.stringify(input));
-        // Run model
-        const py = spawn('python', ['final_production_model/predict_batch.py', inputPath]);
+        // Run model. predict_batch.py imports predict as a sibling module,
+        // so it must run with the model directory as cwd.
+        const py = spawn('python', ['predict_batch.py', inputPath], {
+            cwd: path.join(process.cwd(), 'final_production_model', 'production')
+        });
         let output = '';
+        let stderr = '';
+        py.stderr.on('data', (chunk) => { stderr += chunk; });
         for await (const chunk of py.stdout) { output += chunk; }
-        await new Promise((resolve) => py.on('close', resolve));
+        const exitCode = await new Promise((resolve) => py.on('close', resolve));
         fs.unlinkSync(inputPath);
+        if (exitCode !== 0) {
+            console.error('Risk model failed with exit code', exitCode, stderr);
+            return NextResponse.json({ error: 'Risk model unavailable' }, { status: 503 });
+        }
         let result = [];
         try {
             result = JSON.parse(output);
         } catch (e) {
-            result = [{}];
+            console.error('Risk model returned unparseable output:', output, stderr);
+            return NextResponse.json({ error: 'Risk model unavailable' }, { status: 503 });
         }
         // Return only the risk level/category
         return NextResponse.json({ risk: result[0]?.risk_level || result[0]?.riskCategory || 'Low' });

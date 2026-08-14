@@ -110,8 +110,8 @@ async function fetchModelInputs() {
 async function runPythonBatchModel(batchData) {
     return new Promise((resolve, reject) => {
         const inputPath = 'batch_input.json';
-        const fullInputPath = path.join(process.cwd(), 'final_production_model', inputPath);
-        const pythonDir = path.join(process.cwd(), 'final_production_model');
+        const fullInputPath = path.join(process.cwd(), 'final_production_model', 'production', inputPath);
+        const pythonDir = path.join(process.cwd(), 'final_production_model', 'production');
 
         console.log('Writing batch data to:', fullInputPath);
         console.log('Python working directory:', pythonDir);
