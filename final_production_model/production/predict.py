@@ -162,10 +162,13 @@ def preprocess_input(input_dict: dict, user_history: list[dict] | None = None):
     return X_scaled, df
 
 
+HIGH_RISK_THRESHOLD = 0.65
+
+
 def assign_risk_level(score: float, flagged: bool) -> str:
     if not flagged:
         return 'Low'
-    return 'High' if score >= 0.75 else 'Medium'
+    return 'High' if score >= HIGH_RISK_THRESHOLD else 'Medium'
 
 
 def predict(input_dict: dict, user_history: list[dict] | None = None) -> dict:
