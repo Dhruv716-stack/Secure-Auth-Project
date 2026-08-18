@@ -1,238 +1,235 @@
 "use strict";
-var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
-    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
-    return new (P || (P = Promise))(function (resolve, reject) {
-        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
-        function rejected(value) { try { step(generator["throw"](e)); } catch (e) { reject(e); } }
-        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
-        step((generator = generator.apply(thisArg, _arguments || [])).next());
-    });
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-const prisma = require('../lib/prisma').prisma;
-const { spawn } = require('child_process');
-const fs = require('fs');
-const path = require('path');
 
-// Batch size configuration
+/**
+ * Scores queued behavioural rows and records the results.
+ *
+ * Runs on a 10s cron (scripts/batch_model_cron_v2.js). Each pass takes up to
+ * BATCH_SIZE unscored rows, scores them, writes modelOutput, and marks the
+ * rows scored.
+ *
+ * Rows are marked, not deleted. They are the user's behavioural history -- the
+ * baseline the model compares new sessions against -- and the raw material for
+ * future retraining. `scoredAt` is also what advances the queue: the fetch
+ * selects `scoredAt: null`, so without it the same oldest rows would be read
+ * forever.
+ *
+ * Scoring goes through the model API when MODEL_API_URL is set, and otherwise
+ * spawns Python, mirroring lib/model-client.ts. This file is CommonJS and
+ * cannot import the TypeScript client directly, so the two transports are
+ * reimplemented here; predict_batch.py accepts the same payload shape as the
+ * API so both paths score identically.
+ */
+
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const { spawn } = require('child_process');
+
+const prisma = require('../lib/prisma').prisma;
+
 const BATCH_SIZE = 10;
 
-// Required columns and their expected data types for the model
-const REQUIRED_COLUMNS = {
-    device_type: 'string',
-    click_events: 'number',
-    scroll_events: 'number',
-    touch_events: 'number',
-    keyboard_events: 'number',
-    device_motion: 'number',
-    time_on_page: 'number',
-    screen_size: 'string',
-    browser_info: 'string',
-    language: 'string',
-    timezone_offset: 'number',
-    device_orientation: 'string',
-    geolocation_city: 'string',
-    transaction_amount: 'number',
-    transaction_date: 'string',
-    mouse_movement: 'number'
-};
+/** Past rows per user handed to the model as their personal baseline. */
+const HISTORY_LIMIT = 50;
 
-// Data validation and type conversion function
-function validateAndConvertInput(input) {
-    const validated = {};
-
-    for (const [column, expectedType] of Object.entries(REQUIRED_COLUMNS)) {
-        let value = input[column];
-
-        // Handle missing values
-        if (value === undefined || value === null) {
-            // Set default values based on column type
-            if (expectedType === 'number') {
-                value = 0;
-            } else if (expectedType === 'string') {
-                value = '';
-            }
-        } else {
-            // Type conversion
-            try {
-                switch (expectedType) {
-                    case 'number':
-                        value = Number(value);
-                        if (isNaN(value)) {
-                            console.warn(`Invalid number for ${column}: ${input[column]}, setting to 0`);
-                            value = 0;
-                        }
-                        break;
-                    case 'string':
-                        value = String(value);
-                        // Special handling for transaction_date
-                        if (column === 'transaction_date') {
-                            try {
-                                // Convert JavaScript Date string to expected format
-                                const date = new Date(value);
-                                if (!isNaN(date.getTime())) {
-                                    value = date.toISOString().replace('T', ' ').slice(0, 19);
-                                } else {
-                                    console.warn(`Invalid date format for transaction_date: ${value}, setting to current time`);
-                                    value = new Date().toISOString().replace('T', ' ').slice(0, 19);
-                                }
-                            } catch (dateError) {
-                                console.warn(`Error converting transaction_date: ${dateError.message}, setting to current time`);
-                                value = new Date().toISOString().replace('T', ' ').slice(0, 19);
-                            }
-                        }
-                        break;
-                }
-            } catch (error) {
-                console.warn(`Error converting ${column} to ${expectedType}: ${error.message}`);
-                // Set default value
-                if (expectedType === 'number') {
-                    value = 0;
-                } else if (expectedType === 'string') {
-                    value = '';
-                }
-            }
-        }
-
-        validated[column] = value;
-    }
-
-    return validated;
-}
+const MODEL_DIR = path.join(process.cwd(), 'final_production_model', 'production');
 
 async function fetchModelInputs() {
-    return await prisma.modelInput.findMany({
+    return prisma.modelInput.findMany({
+        where: { scoredAt: null },
         orderBy: { id: 'asc' },
-        take: BATCH_SIZE, // Only fetch batch_size records
+        take: BATCH_SIZE,
     });
 }
 
-async function runPythonBatchModel(batchData) {
-    return new Promise((resolve, reject) => {
-        const inputPath = 'batch_input.json';
-        const fullInputPath = path.join(process.cwd(), 'final_production_model', 'production', inputPath);
-        const pythonDir = path.join(process.cwd(), 'final_production_model', 'production');
-
-        console.log('Writing batch data to:', fullInputPath);
-        console.log('Python working directory:', pythonDir);
-        console.log('Batch data sample:', JSON.stringify(batchData[0], null, 2));
-
-        fs.writeFileSync(fullInputPath, JSON.stringify(batchData));
-        const py = spawn('python', ['predict_batch.py', inputPath], {
-            cwd: pythonDir
-        });
-        let output = '';
-        let stderr = '';
-        py.stdout.on('data', (data) => {
-            output += data;
-            console.log('Python stdout chunk:', data.toString());
-        });
-        py.stderr.on('data', (err) => {
-            stderr += err;
-            console.error('Python stderr chunk:', err.toString());
-        });
-        py.on('close', (code) => {
-            fs.unlinkSync(fullInputPath);
-            console.log('Python process exited with code:', code);
-            console.log('Raw Python output length:', output.length);
-            console.log('Raw Python output (first 500 chars):', output.substring(0, 500));
-            if (stderr) {
-                console.log('Python stderr:', stderr);
-            }
-            if (code === 0) {
-                try {
-                    // Try to parse the entire output as JSON
-                    const cleanOutput = output.trim();
-                    console.log('Attempting to parse JSON from:', cleanOutput.substring(0, 200) + '...');
-                    const result = JSON.parse(cleanOutput);
-                    console.log('Successfully parsed JSON with', result.length, 'items');
-                    resolve(result);
-                } catch (e) {
-                    console.error('JSON parse error:', e.message);
-                    console.error('Full output that failed to parse:', output);
-                    reject('Failed to parse model output: ' + e.message);
-                }
-            } else {
-                reject('Python script failed with code: ' + code);
-            }
-        });
-    });
-}
-
-async function deleteProcessedInputs(inputIds) {
-    if (inputIds.length > 0) {
-        await prisma.modelInput.deleteMany({
-            where: {
-                id: { in: inputIds }
-            }
-        });
+/**
+ * Fetch each user's prior behaviour, excluding the sessions in this batch.
+ *
+ * Excluding them matters: the "is this device new for this user" features
+ * compare against the devices seen in history, so if the current session is
+ * present its device is trivially familiar and the account-takeover signal
+ * silently evaluates to zero.
+ *
+ * Rows are grouped by customer because history is per-user; scoring one user's
+ * session against another's baseline would be meaningless.
+ */
+async function fetchHistories(inputs) {
+    const byCustomer = new Map();
+    for (const input of inputs) {
+        if (!byCustomer.has(input.customer_id)) byCustomer.set(input.customer_id, new Set());
+        byCustomer.get(input.customer_id).add(input.session_id);
     }
+
+    const histories = new Map();
+    for (const [customerId, sessionIds] of byCustomer) {
+        try {
+            histories.set(
+                customerId,
+                await prisma.modelInput.findMany({
+                    where: {
+                        customer_id: customerId,
+                        session_id: { notIn: Array.from(sessionIds) },
+                    },
+                    orderBy: { id: 'desc' },
+                    take: HISTORY_LIMIT,
+                    select: {
+                        click_events: true,
+                        keyboard_events: true,
+                        time_on_page: true,
+                        device_type: true,
+                        browser_info: true,
+                        geolocation_city: true,
+                    },
+                }),
+            );
+        } catch (err) {
+            // History is an enhancement. Losing it weakens detection for this
+            // batch but must not stop the batch from being scored.
+            console.error(`History lookup failed for ${customerId}:`, err.message);
+            histories.set(customerId, []);
+        }
+    }
+    return histories;
+}
+
+function toModelRow(input) {
+    return {
+        device_type: input.device_type ?? 'unknown',
+        click_events: input.click_events ?? 0,
+        scroll_events: input.scroll_events ?? 0,
+        touch_events: input.touch_events ?? 0,
+        keyboard_events: input.keyboard_events ?? 0,
+        device_motion: input.device_motion ?? 0,
+        time_on_page: input.time_on_page ?? 0,
+        screen_size: input.screen_size ?? 'unknown',
+        browser_info: input.browser_info ?? 'unknown',
+        language: input.language ?? 'unknown',
+        timezone_offset: input.timezone_offset ?? 0,
+        device_orientation: input.device_orientation ?? 'unknown',
+        geolocation_city: input.geolocation_city ?? 'unknown',
+        transaction_amount: Math.max(0, Number(input.transaction_amount ?? 0)),
+        transaction_date:
+            input.transaction_date instanceof Date
+                ? input.transaction_date.toISOString().replace('T', ' ').slice(0, 19)
+                : String(input.transaction_date ?? ''),
+        mouse_movement: input.mouse_movement ?? 0,
+    };
+}
+
+async function scoreViaApi(rows, history, apiUrl) {
+    const res = await fetch(`${apiUrl.replace(/\/$/, '')}/predict`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows, user_history: history.length ? history : null }),
+        signal: AbortSignal.timeout(30000),
+    });
+    if (!res.ok) {
+        throw new Error(`Model API returned ${res.status}: ${await res.text()}`);
+    }
+    return (await res.json()).results;
+}
+
+function scoreViaSpawn(rows, history) {
+    return new Promise((resolve, reject) => {
+        // Unique filename: concurrent runs sharing one path would overwrite
+        // each other's input and score the wrong rows.
+        const inputPath = path.join(os.tmpdir(), `batch_${process.pid}_${Date.now()}.json`);
+        fs.writeFileSync(
+            inputPath,
+            JSON.stringify({ rows, user_history: history.length ? history : null }),
+        );
+
+        const py = spawn('python', ['predict_batch.py', inputPath], { cwd: MODEL_DIR });
+        let stdout = '';
+        let stderr = '';
+        py.stdout.on('data', (d) => { stdout += d; });
+        py.stderr.on('data', (d) => { stderr += d; });
+        py.on('error', reject);
+        py.on('close', (code) => {
+            try { fs.unlinkSync(inputPath); } catch { /* best effort */ }
+            if (code !== 0) return reject(new Error(`Model exited ${code}: ${stderr}`));
+            try {
+                resolve(JSON.parse(stdout));
+            } catch {
+                reject(new Error(`Unparseable model output: ${stdout.slice(0, 300)}`));
+            }
+        });
+    });
+}
+
+/**
+ * Score one user's rows. Split per user so each batch is compared against its
+ * own owner's baseline.
+ */
+async function scoreForCustomer(rows, history) {
+    const apiUrl = process.env.MODEL_API_URL;
+    return apiUrl ? scoreViaApi(rows, history, apiUrl) : scoreViaSpawn(rows, history);
 }
 
 async function main() {
     try {
         const inputs = await fetchModelInputs();
         if (inputs.length === 0) {
-            console.log('No modelInput records found.');
+            console.log('No unscored modelInput records.');
             return;
         }
 
-        console.log(`Processing batch of ${inputs.length} records...`);
+        console.log(
+            `Scoring ${inputs.length} rows via ${process.env.MODEL_API_URL ? 'model API' : 'python spawn'}...`,
+        );
 
-        // Prepare batch for model with validation and type conversion
-        const batch = inputs.map((input, index) => {
-            const rawInput = {
-                device_type: input.device_type,
-                click_events: input.click_events,
-                scroll_events: input.scroll_events,
-                touch_events: input.touch_events,
-                keyboard_events: input.keyboard_events,
-                device_motion: input.device_motion,
-                time_on_page: input.time_on_page,
-                screen_size: input.screen_size,
-                browser_info: input.browser_info,
-                language: input.language,
-                timezone_offset: input.timezone_offset,
-                device_orientation: input.device_orientation,
-                geolocation_city: input.geolocation_city,
-                transaction_amount: input.transaction_amount,
-                transaction_date: input.transaction_date,
-                mouse_movement: input.mouse_movement
-            };
+        const histories = await fetchHistories(inputs);
 
-            const validatedInput = validateAndConvertInput(rawInput);
-            console.log(`Input ${index + 1} validated and converted:`, validatedInput);
-
-            return validatedInput;
+        // Group by customer so each user's rows are scored against their own
+        // history, then reassemble results in the original order.
+        const groups = new Map();
+        inputs.forEach((input, index) => {
+            if (!groups.has(input.customer_id)) groups.set(input.customer_id, []);
+            groups.get(input.customer_id).push(index);
         });
 
-        const results = await runPythonBatchModel(batch);
-
-        // Store outputs in modelOutput
-        const inputIds = [];
-        for (let i = 0; i < inputs.length; i++) {
-            const input = inputs[i];
-            const output = results[i];
-            inputIds.push(input.id);
-
-            await prisma.modelOutput.create({
-                data: {
-                    customerId: input.customer_id,
-                    sessionId: input.session_id,
-                    anomalyScore: output.anomaly_score ?? 0,
-                    riskCategory: output.risk_level ?? '',
-                    riskReasons: output.risk_reason ?? '',
-                }
+        const results = new Array(inputs.length);
+        for (const [customerId, indices] of groups) {
+            const scored = await scoreForCustomer(
+                indices.map((i) => toModelRow(inputs[i])),
+                histories.get(customerId) || [],
+            );
+            indices.forEach((inputIndex, position) => {
+                results[inputIndex] = scored[position];
             });
         }
 
-        // Delete processed inputs
-        await deleteProcessedInputs(inputIds);
+        await prisma.modelOutput.createMany({
+            data: inputs.map((input, i) => ({
+                customerId: input.customer_id,
+                sessionId: input.session_id,
+                anomalyScore: results[i]?.anomaly_score ?? 0,
+                riskCategory: results[i]?.risk_level ?? '',
+                riskReasons: results[i]?.risk_reason ?? '',
+            })),
+        });
 
-        console.log(`Batch processed: ${inputs.length} records. Inputs deleted from modelInput table.`);
+        // Mark scored only after the outputs are safely stored. If the process
+        // dies between the two, the rows stay unscored and are retried, which
+        // is preferable to losing them silently.
+        await prisma.modelInput.updateMany({
+            where: { id: { in: inputs.map((i) => i.id) } },
+            data: { scoredAt: new Date() },
+        });
+
+        const counts = results.reduce((acc, r) => {
+            const level = r?.risk_level ?? 'unknown';
+            acc[level] = (acc[level] || 0) + 1;
+            return acc;
+        }, {});
+        console.log(`Scored ${inputs.length} rows:`, counts);
     } catch (err) {
-        console.error('Error in batch worker:', err);
+        // Rows remain unscored, so the next tick retries them.
+        console.error('Batch worker failed:', err.message);
+        process.exitCode = 1;
+    } finally {
+        await prisma.$disconnect();
     }
 }
 
-main(); 
+main();

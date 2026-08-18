@@ -6,6 +6,7 @@
     "build": "prisma generate && next build",
     "dev": "next dev",
     "batch": "node scripts/batch_model_cron_v2.js",
+    "model-api": "cd final_production_model/production && python -m uvicorn model_api:app --port 8000",
     "lint": "next lint",
     "start": "next start"
   },

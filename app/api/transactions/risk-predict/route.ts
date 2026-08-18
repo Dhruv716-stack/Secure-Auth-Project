@@ -1,60 +1,49 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { spawn } from 'child_process';
-import fs from 'fs';
-import path from 'path';
+import { verifyJWT } from '@/lib/auth';
+import { scoreRows } from '@/lib/model-client';
+import { getUserHistory } from '@/lib/user-history';
 
+/**
+ * Pre-flight risk check, called from the send-money form before a transfer is
+ * committed. Scores the proposed transaction without recording anything.
+ */
 export async function POST(req: NextRequest) {
     try {
+        // Authenticated so the score can be personalised against this user's
+        // own history. Without an identity the account-takeover features have
+        // nothing to compare against and silently contribute nothing.
+        const token = req.cookies.get('auth-token')?.value;
+        const user = token ? verifyJWT(token) : null;
+        if (!user) {
+            return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+        }
+
         const body = await req.json();
-        // Prepare input for the model (same as in transaction POST)
-        const rawInput = [{
-            device_type: body.device || null,
-            click_events: 0,
-            scroll_events: 0,
-            touch_events: 0,
-            keyboard_events: 0,
-            device_motion: 0,
-            time_on_page: 0,
-            screen_size: null,
-            browser_info: null,
-            language: null,
-            timezone_offset: 0,
-            device_orientation: null,
-            geolocation_city: body.location && typeof body.location === 'string' ? body.location.split(',')[0] : null,
+
+        // Only fields the caller actually knows are populated. predict.py
+        // imputes the rest; inventing values here would fabricate behaviour.
+        const row = {
+            device_type: body.device ?? null,
+            geolocation_city:
+                typeof body.location === 'string' ? body.location.split(',')[0] : null,
             transaction_amount: Number(body.amount),
             transaction_date: new Date().toISOString().replace('T', ' ').slice(0, 19),
-            mouse_movement: 0
-        }];
-        const input = rawInput;
-        // Write input to temp file
-        const inputPath = path.join(process.cwd(), 'final_production_model', 'production', 'single_input.json');
-        fs.writeFileSync(inputPath, JSON.stringify(input));
-        // Run model. predict_batch.py imports predict as a sibling module,
-        // so it must run with the model directory as cwd.
-        const py = spawn('python', ['predict_batch.py', inputPath], {
-            cwd: path.join(process.cwd(), 'final_production_model', 'production')
+        };
+
+        const history = await getUserHistory(user.customerId, body.sessionId ?? null);
+        const [result] = await scoreRows([row], history);
+
+        return NextResponse.json({
+            risk: result.risk_level,
+            score: result.anomaly_score,
+            reason: result.risk_reason,
         });
-        let output = '';
-        let stderr = '';
-        py.stderr.on('data', (chunk) => { stderr += chunk; });
-        for await (const chunk of py.stdout) { output += chunk; }
-        const exitCode = await new Promise((resolve) => py.on('close', resolve));
-        fs.unlinkSync(inputPath);
-        if (exitCode !== 0) {
-            console.error('Risk model failed with exit code', exitCode, stderr);
-            return NextResponse.json({ error: 'Risk model unavailable' }, { status: 503 });
-        }
-        let result = [];
-        try {
-            result = JSON.parse(output);
-        } catch (e) {
-            console.error('Risk model returned unparseable output:', output, stderr);
-            return NextResponse.json({ error: 'Risk model unavailable' }, { status: 503 });
-        }
-        // Return only the risk level/category
-        return NextResponse.json({ risk: result[0]?.risk_level || result[0]?.riskCategory || 'Low' });
     } catch (error) {
-        console.error('Risk predict error:', error);
-        return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+        // 503, not a default verdict. This endpoint gates a money transfer, so
+        // "we could not assess this" must be distinguishable from "this is
+        // safe" -- an earlier version returned 'Low' on failure, which made an
+        // outage look like a clean result.
+        console.error('Risk predict failed:', error);
+        return NextResponse.json({ error: 'Risk model unavailable' }, { status: 503 });
     }
-} 
+}

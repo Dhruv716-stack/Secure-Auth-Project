@@ -120,6 +120,20 @@ model modelInput {
   // Ground-truth training target. Null for live inference data, which
   // has no label at collection time.
   label              Int?
+
+  // Null until the batch worker has scored this row. Rows are retained after
+  // scoring rather than deleted: they are this user's behavioural history,
+  // which the model needs to detect deviation from their own baseline, and
+  // they are the raw material for future retraining. Prune old rows manually.
+  //
+  // This is also what advances the queue. The worker selects `scoredAt: null`,
+  // so without the marker it would re-read the same oldest rows forever.
+  scoredAt           DateTime? @map("scored_at")
+
+  // History lookups filter by customer and skip already-scored rows; the
+  // queue read is the hot path and grows as rows accumulate.
+  @@index([customer_id, scoredAt])
+  @@index([scoredAt])
 }
 
 model Notification {

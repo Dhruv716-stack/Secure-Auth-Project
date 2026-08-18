@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyJWT } from '@/lib/auth';
-import { spawn } from 'child_process';
+import { scoreRows, type RiskResult } from '@/lib/model-client';
+import { getUserHistory } from '@/lib/user-history';
 
 function isValidUpiId(upiId: string) {
   // Simple UPI ID validation: username@bank
@@ -21,7 +22,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Parse request body
-    const { amount, upiId, device, lat, lng, category } = await req.json();
+    const { amount, upiId, device, lat, lng, category, sessionId } = await req.json();
     if (!amount || !upiId || !category) {
       return NextResponse.json({ error: 'Amount, UPI ID, and category are required' }, { status: 400 });
     }
@@ -99,117 +100,30 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    // Data validation and type conversion function
-    function validateAndConvertInput(input: any) {
-      const requiredColumns = {
-        device_type: 'string',
-        click_events: 'number',
-        scroll_events: 'number',
-        touch_events: 'number',
-        keyboard_events: 'number',
-        device_motion: 'number',
-        time_on_page: 'number',
-        screen_size: 'string',
-        browser_info: 'string',
-        language: 'string',
-        timezone_offset: 'number',
-        device_orientation: 'string',
-        geolocation_city: 'string',
-        transaction_amount: 'number',
-        transaction_date: 'string',
-        mouse_movement: 'number'
-      };
-
-      const validated: any = {};
-
-      for (const [column, expectedType] of Object.entries(requiredColumns)) {
-        let value = input[column];
-
-        // Handle missing values
-        if (value === undefined || value === null) {
-          if (expectedType === 'number') {
-            value = 0;
-          } else if (expectedType === 'string') {
-            value = '';
-          }
-        } else {
-          // Type conversion
-          try {
-            switch (expectedType) {
-              case 'number':
-                value = Number(value);
-                if (isNaN(value)) {
-                  console.warn(`Invalid number for ${column}: ${input[column]}, setting to 0`);
-                  value = 0;
-                }
-                break;
-              case 'string':
-                value = String(value);
-                break;
-            }
-          } catch (error) {
-            console.warn(`Error converting ${column} to ${expectedType}: ${error}`);
-            if (expectedType === 'number') {
-              value = 0;
-            } else if (expectedType === 'string') {
-              value = '';
-            }
-          }
-        }
-
-        validated[column] = value;
-      }
-
-      return validated;
-    }
-
-    // Prepare input for the model with validation and type conversion
-    const rawInput = [{
-      device_type: device || null,
-      click_events: 0,
-      scroll_events: 0,
-      touch_events: 0,
-      keyboard_events: 0,
-      device_motion: 0,
-      time_on_page: 0,
-      screen_size: null,
-      browser_info: null,
-      language: null,
-      timezone_offset: 0,
-      device_orientation: null,
-      geolocation_city: location && typeof location === 'string' ? location.split(',')[0] : null,
+    // Only the fields this route actually knows. scoreRows() normalises the
+    // rest to the same defaults predict.py would impute.
+    const row = {
+      device_type: device ?? null,
+      geolocation_city: typeof location === 'string' ? location.split(',')[0] : null,
       transaction_amount: Number(amount),
-      transaction_date: (transaction.createdAt instanceof Date ? transaction.createdAt : new Date(transaction.createdAt)).toISOString().replace('T', ' ').slice(0, 19),
-      mouse_movement: 0
-    }];
+      transaction_date: (transaction.createdAt instanceof Date
+        ? transaction.createdAt
+        : new Date(transaction.createdAt)
+      ).toISOString().replace('T', ' ').slice(0, 19),
+    };
 
-    const input = rawInput.map(validateAndConvertInput);
-
-    const fs = require('fs');
-    const path = require('path');
-    const inputPath = path.join(process.cwd(), 'final_production_model', 'production', 'single_input.json');
-    fs.writeFileSync(inputPath, JSON.stringify(input));
-    // predict_batch.py imports predict as a sibling module, so it must run
-    // with the model directory as cwd.
-    const py = spawn('python', ['predict_batch.py', inputPath], {
-      cwd: path.join(process.cwd(), 'final_production_model', 'production')
-    });
-    let output = '';
-    let stderr = '';
-    py.stderr.on('data', (chunk: Buffer) => { stderr += chunk; });
-    for await (const chunk of py.stdout) { output += chunk; }
-    const exitCode = await new Promise((resolve) => py.on('close', resolve));
-    fs.unlinkSync(inputPath);
-    let result: any[] = [];
-    if (exitCode !== 0) {
-      console.error('Risk model failed with exit code', exitCode, stderr);
-    } else {
-      try {
-        result = JSON.parse(output);
-      } catch (e) {
-        console.error('Risk model returned unparseable output:', output, stderr);
-      }
+    // The transaction is already committed above, so scoring must not be able
+    // to undo it: a scoring outage leaves the risk fields null rather than
+    // failing a transfer the user has already been told succeeded. Null is
+    // readable as "not assessed", which a default 'Low' would not be.
+    let result: RiskResult[] = [];
+    try {
+      const history = await getUserHistory(user.customerId, sessionId ?? null);
+      result = await scoreRows([row], history);
+    } catch (error) {
+      console.error('Risk scoring failed; transaction stored unscored:', error);
     }
+
     // Update transaction with model output
     await prisma.transaction.update({
       where: { id: transaction.id },
