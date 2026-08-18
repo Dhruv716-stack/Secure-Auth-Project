@@ -285,6 +285,61 @@ def test_a_new_device_scores_no_lower_than_a_familiar_one(client):
     assert unfamiliar >= familiar
 
 
+# --------------------------------------------------------------------------
+# Batched scoring must not change results
+# --------------------------------------------------------------------------
+
+
+def test_batched_scoring_matches_row_by_row_exactly():
+    """predict_many() must agree with predict() to the last bit.
+
+    predict_many exists purely for speed. If it ever diverged from predict --
+    through imputation behaving differently across a batch, or an encoder
+    seeing a different set of categories -- the API would silently return
+    different verdicts than the reference implementation. Exact equality is the
+    right assertion here: same maths, same inputs, so anything but 0.0
+    difference means the batch path changed something it should not have.
+    """
+    import predict as p
+
+    rows = [
+        row(transaction_amount=0, click_events=0, time_on_page=0),
+        row(transaction_amount=250000, click_events=500),
+        row(geolocation_city="", browser_info="unknown"),
+        row(device_type="Mobile", device_orientation="Portrait"),
+        row(),
+    ]
+
+    one_at_a_time = [p.predict(r) for r in rows]
+    batched = p.predict_many(rows)
+
+    for single, batch in zip(one_at_a_time, batched):
+        assert single["anomaly_score"] == batch["anomaly_score"]
+        assert single["risk_level"] == batch["risk_level"]
+        assert single["predicted_label"] == batch["predicted_label"]
+
+
+def test_batched_scoring_matches_with_history():
+    """The same equivalence must hold once history features are active."""
+    import predict as p
+
+    history = [row(device_type="PC", geolocation_city="Mumbai") for _ in range(4)]
+    rows = [row(device_type="Mobile"), row(device_type="PC"), row()]
+
+    one_at_a_time = [p.predict(r, history) for r in rows]
+    batched = p.predict_many(rows, history)
+
+    for single, batch in zip(one_at_a_time, batched):
+        assert single["anomaly_score"] == batch["anomaly_score"]
+
+
+def test_empty_batch_returns_empty_list():
+    """Guarded directly because the API rejects [] before it reaches here."""
+    import predict as p
+
+    assert p.predict_many([]) == []
+
+
 def test_history_shorter_than_two_rows_is_safe(client):
     """Z-scores need >=2 history rows; fewer must degrade quietly, not crash."""
     for n in (0, 1):

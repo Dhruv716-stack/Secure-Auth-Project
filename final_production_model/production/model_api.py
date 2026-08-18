@@ -53,7 +53,7 @@ async def lifespan(app: FastAPI):
     try:
         import predict as predict_module
 
-        _model["predict"] = predict_module.predict
+        _model["predict"] = predict_module.predict_many
         _model["module"] = predict_module
         _model["loaded"] = True
         logger.info("Model loaded; service ready.")
@@ -129,7 +129,10 @@ def score(request: PredictRequest) -> PredictResponse:
     )
 
     try:
-        results = [_model["predict"](row.model_dump(), history) for row in request.rows]
+        # One batched call, not a loop: the forest's per-call cost dominates,
+        # so scoring ten rows together is roughly ten times cheaper than
+        # scoring them one at a time. See predict_many().
+        results = _model["predict"]([row.model_dump() for row in request.rows], history)
     except Exception as exc:  # noqa: BLE001 - converted to an explicit 5xx
         logger.exception("Scoring failed")
         raise HTTPException(status_code=500, detail=f"Scoring failed: {exc}") from exc
