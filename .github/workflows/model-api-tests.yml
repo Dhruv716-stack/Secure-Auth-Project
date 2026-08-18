@@ -1,0 +1,44 @@
+name: Model API tests
+
+# Runs the model API test suite on every push and pull request, so a change
+# that breaks the scoring contract is caught on GitHub rather than in the app.
+#
+# Scoped with `paths:` to the model directory: the Next.js side has no Python
+# tests, and running this on unrelated commits would only add noise.
+
+on:
+  push:
+    paths:
+      - 'final_production_model/**'
+      - '.github/workflows/model-api-tests.yml'
+  pull_request:
+    paths:
+      - 'final_production_model/**'
+      - '.github/workflows/model-api-tests.yml'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Matches the local development version. The pinned scikit-learn in
+          # requirements.txt must be able to unpickle the committed .pkl
+          # artifacts, so the interpreter version is not a free choice.
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r final_production_model/requirements.txt
+          pip install pytest httpx
+
+      - name: Run tests
+        working-directory: final_production_model/production
+        run: python -m pytest test_model_api.py -v
