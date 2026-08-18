@@ -191,9 +191,50 @@ def test_missing_fields_are_accepted_and_defaulted(client):
 
 
 def test_empty_row_object_is_accepted(client):
-    """Every field is optional, so `{}` is the fully-defaulted row."""
+    """Every field is optional, so `{}` is a row with nothing observed."""
     resp = client.post("/predict", json={"rows": [{}]})
     assert resp.status_code == 200
+
+
+def test_omitted_fields_are_not_treated_as_zero(client):
+    """Unobserved is not the same as zero, and must not score the same.
+
+    A row reporting 0 clicks, 0 mouse movement and 0 seconds on the page
+    describes a bot, and the model is right to flag it. A row that simply does
+    not mention those fields describes a caller that did not measure them, and
+    must be imputed instead.
+
+    Conflating the two is not a rounding error: it silently inflated every
+    score from callers that carry no behavioural data, which is how a
+    pre-transaction risk check ended up returning High for ordinary transfers.
+    """
+    observed_nothing = {
+        "device_type": "PC",
+        "geolocation_city": "Mumbai",
+        "transaction_amount": 50000,
+        "transaction_date": "2026-08-18 10:00:00",
+    }
+    explicit_zeros = {
+        **observed_nothing,
+        "click_events": 0,
+        "scroll_events": 0,
+        "touch_events": 0,
+        "keyboard_events": 0,
+        "device_motion": 0,
+        "time_on_page": 0,
+        "mouse_movement": 0,
+    }
+
+    omitted = client.post("/predict", json={"rows": [observed_nothing]}).json()
+    zeroed = client.post("/predict", json={"rows": [explicit_zeros]}).json()
+
+    omitted_score = omitted["results"][0]["anomaly_score"]
+    zeroed_score = zeroed["results"][0]["anomaly_score"]
+
+    assert omitted_score != zeroed_score
+    # Imputed values come from ordinary training rows, so the row that claims
+    # no activity at all must not look safer than the one that claims nothing.
+    assert omitted_score < zeroed_score
 
 
 def test_wrong_type_is_rejected_before_reaching_the_model(client):

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifyJWT } from '@/lib/auth';
 import { scoreRows } from '@/lib/model-client';
-import { getUserHistory } from '@/lib/user-history';
+import { getLatestSessionBehavior, getUserHistory } from '@/lib/user-history';
 
 /**
  * Pre-flight risk check, called from the send-money form before a transfer is
@@ -19,18 +19,34 @@ export async function POST(req: NextRequest) {
         }
 
         const body = await req.json();
+        const sessionId = body.sessionId ?? null;
 
-        // Only fields the caller actually knows are populated. predict.py
-        // imputes the rest; inventing values here would fabricate behaviour.
+        // The request body carries the proposed transaction, not the user's
+        // behaviour. Take the behaviour from what the browser has already
+        // reported for this session; sending zeroes for clicks, mouse movement
+        // and time on page would describe a bot, and the model would rightly
+        // flag every request as High.
+        const observed = await getLatestSessionBehavior(user.customerId, sessionId);
+
+        // When nothing has been observed yet -- a new user, or the first
+        // seconds of a session -- those fields are simply omitted. predict.py
+        // imputes missing columns from its own training distribution, which is
+        // what it does for absent data everywhere else. Substituting zeroes
+        // here would not be "no information", it would be a positive claim
+        // that the user did nothing.
         const row = {
-            device_type: body.device ?? null,
+            ...(observed ?? {}),
+            // The transaction being proposed always comes from the request.
+            device_type: body.device ?? observed?.device_type ?? null,
             geolocation_city:
-                typeof body.location === 'string' ? body.location.split(',')[0] : null,
+                typeof body.location === 'string'
+                    ? body.location.split(',')[0]
+                    : observed?.geolocation_city ?? null,
             transaction_amount: Number(body.amount),
             transaction_date: new Date().toISOString().replace('T', ' ').slice(0, 19),
         };
 
-        const history = await getUserHistory(user.customerId, body.sessionId ?? null);
+        const history = await getUserHistory(user.customerId, sessionId);
         const [result] = await scoreRows([row], history);
 
         return NextResponse.json({

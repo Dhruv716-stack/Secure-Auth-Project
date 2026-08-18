@@ -10,6 +10,7 @@ import { Send } from "lucide-react"
 import { useTransactionEvent } from "@/contexts/TransactionEventContext";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { useAuth } from "@/contexts/AuthContext";
+import { sessionManager } from "@/lib/session";
 
 const receivers = [
   { id: "1", name: "Alice Johnson", account: "****1234" },
@@ -91,7 +92,11 @@ export function SendMoneyCard({ currentRisk }: { currentRisk?: string | null }) 
     try {
       const device = getDeviceInfo();
       const { lat, lng } = await getLocation();
-      const tx = { amount, upiId: receiverUpi, device, lat, lng, category };
+      // The session id lets the server look up the behaviour already recorded
+      // for this session (clicks, time on page, mouse movement) instead of
+      // scoring the transfer with no behavioural context at all.
+      const sessionId = sessionManager.getSession()?.sessionId ?? null;
+      const tx = { amount, upiId: receiverUpi, device, lat, lng, category, sessionId };
       // Use currentRisk from props
       if (currentRisk === "High") {
         setResult("Transaction blocked: High risk detected. Please contact support.");

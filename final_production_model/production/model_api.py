@@ -125,14 +125,14 @@ def score(request: PredictRequest) -> PredictResponse:
         )
 
     history = (
-        [h.model_dump() for h in request.user_history] if request.user_history else None
+        [h.to_model_input() for h in request.user_history] if request.user_history else None
     )
 
     try:
         # One batched call, not a loop: the forest's per-call cost dominates,
         # so scoring ten rows together is roughly ten times cheaper than
         # scoring them one at a time. See predict_many().
-        results = _model["predict"]([row.model_dump() for row in request.rows], history)
+        results = _model["predict"]([row.to_model_input() for row in request.rows], history)
     except Exception as exc:  # noqa: BLE001 - converted to an explicit 5xx
         logger.exception("Scoring failed")
         raise HTTPException(status_code=500, detail=f"Scoring failed: {exc}") from exc

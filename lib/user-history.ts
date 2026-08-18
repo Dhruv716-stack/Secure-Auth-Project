@@ -34,6 +34,58 @@ const HISTORY_LIMIT = 50;
  * scoring. Note the z-score features additionally need at least 2 rows, so a
  * user's second-ever session still scores without personal baselines.
  */
+/**
+ * Fetch the most recent observed behaviour for a session.
+ *
+ * The browser already reports click, scroll, keyboard, mouse and time-on-page
+ * counts once per second (see hooks/useSessionBatch). Endpoints that score a
+ * proposed action -- rather than a batch of collected rows -- do not carry
+ * those numbers in their request body, and sending zeroes instead is actively
+ * misleading: a session with no clicks, no mouse movement and no time on page
+ * does not look like a cautious user, it looks like a bot, so the model
+ * correctly flags it. Every such request then scores High regardless of what
+ * the user actually did.
+ *
+ * Reading the latest stored row for the session gives the model real
+ * behaviour to judge. Returns null when nothing has been recorded yet, which
+ * is normal for the first few seconds of a session; callers should fall back
+ * to letting predict.py impute rather than substituting zeroes.
+ */
+export async function getLatestSessionBehavior(
+  customerId: string,
+  sessionId: string | null,
+): Promise<BehaviorRow | null> {
+  if (!customerId || !sessionId) return null;
+
+  try {
+    const row = await prisma.modelInput.findFirst({
+      where: { customer_id: customerId, session_id: sessionId },
+      orderBy: { id: 'desc' },
+      select: {
+        device_type: true,
+        click_events: true,
+        scroll_events: true,
+        touch_events: true,
+        keyboard_events: true,
+        device_motion: true,
+        time_on_page: true,
+        screen_size: true,
+        browser_info: true,
+        language: true,
+        timezone_offset: true,
+        device_orientation: true,
+        geolocation_city: true,
+        mouse_movement: true,
+      },
+    });
+
+    return row;
+  } catch (error) {
+    console.error('Failed to fetch session behaviour:', error);
+    return null;
+  }
+}
+
 export async function getUserHistory(
   customerId: string,
   currentSessionId: string | null,

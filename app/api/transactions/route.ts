@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyJWT } from '@/lib/auth';
 import { scoreRows, type RiskResult } from '@/lib/model-client';
-import { getUserHistory } from '@/lib/user-history';
+import { getLatestSessionBehavior, getUserHistory } from '@/lib/user-history';
 
 function isValidUpiId(upiId: string) {
   // Simple UPI ID validation: username@bank
@@ -100,24 +100,33 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    // Only the fields this route actually knows. scoreRows() normalises the
-    // rest to the same defaults predict.py would impute.
-    const row = {
-      device_type: device ?? null,
-      geolocation_city: typeof location === 'string' ? location.split(',')[0] : null,
-      transaction_amount: Number(amount),
-      transaction_date: (transaction.createdAt instanceof Date
-        ? transaction.createdAt
-        : new Date(transaction.createdAt)
-      ).toISOString().replace('T', ' ').slice(0, 19),
-    };
-
     // The transaction is already committed above, so scoring must not be able
     // to undo it: a scoring outage leaves the risk fields null rather than
     // failing a transfer the user has already been told succeeded. Null is
     // readable as "not assessed", which a default 'Low' would not be.
     let result: RiskResult[] = [];
     try {
+      // Behaviour comes from what the browser has already reported for this
+      // session, not from the request body, which only describes the transfer.
+      // Unobserved fields are left absent for predict.py to impute -- passing
+      // zeroes would claim the user clicked nothing and spent no time on the
+      // page, which reads as a bot and inflates every score.
+      const observed = await getLatestSessionBehavior(user.customerId, sessionId ?? null);
+
+      const row = {
+        ...(observed ?? {}),
+        device_type: device ?? observed?.device_type ?? null,
+        geolocation_city:
+          typeof location === 'string'
+            ? location.split(',')[0]
+            : observed?.geolocation_city ?? null,
+        transaction_amount: Number(amount),
+        transaction_date: (transaction.createdAt instanceof Date
+          ? transaction.createdAt
+          : new Date(transaction.createdAt)
+        ).toISOString().replace('T', ' ').slice(0, 19),
+      };
+
       const history = await getUserHistory(user.customerId, sessionId ?? null);
       result = await scoreRows([row], history);
     } catch (error) {

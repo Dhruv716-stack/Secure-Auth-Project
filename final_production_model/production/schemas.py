@@ -22,27 +22,39 @@ class BehaviorRow(BaseModel):
     """One second of observed session behaviour.
 
     Mirrors the columns of the `modelInput` table and the feature names the
-    model was trained on. Defaults match predict.py's own fallbacks.
+    model was trained on.
+
+    Every field defaults to None, meaning "not observed", and such fields are
+    dropped before reaching the model so predict.py imputes them from the
+    training distribution. That distinction matters: a defaulted 0 is not
+    missing data, it is a positive claim that the user clicked nothing, moved
+    nothing and spent no time on the page. That profile reads as a bot, and
+    the model rightly flags it -- so defaulting to zero made every request
+    from a caller without behavioural data score High.
     """
 
-    device_type: str = "unknown"
-    click_events: int = Field(0, ge=0)
-    scroll_events: int = Field(0, ge=0)
-    touch_events: int = Field(0, ge=0)
-    keyboard_events: int = Field(0, ge=0)
-    device_motion: float = 0.0
-    time_on_page: int = Field(0, ge=0)
-    screen_size: str = "unknown"
-    browser_info: str = "unknown"
-    language: str = "unknown"
-    timezone_offset: int = 0
-    device_orientation: str = "unknown"
-    geolocation_city: str = "unknown"
+    device_type: str | None = None
+    click_events: int | None = Field(None, ge=0)
+    scroll_events: int | None = Field(None, ge=0)
+    touch_events: int | None = Field(None, ge=0)
+    keyboard_events: int | None = Field(None, ge=0)
+    device_motion: float | None = None
+    time_on_page: int | None = Field(None, ge=0)
+    screen_size: str | None = None
+    browser_info: str | None = None
+    language: str | None = None
+    timezone_offset: int | None = None
+    device_orientation: str | None = None
+    geolocation_city: str | None = None
     # Negative amounts never appeared in training, so model behaviour there is
     # undefined. Reject rather than score something meaningless.
-    transaction_amount: float = Field(0.0, ge=0)
-    transaction_date: str = ""
-    mouse_movement: int = Field(0, ge=0)
+    transaction_amount: float | None = Field(None, ge=0)
+    transaction_date: str | None = None
+    mouse_movement: int | None = Field(None, ge=0)
+
+    def to_model_input(self) -> dict:
+        """Drop unobserved fields so predict.py can impute them."""
+        return {k: v for k, v in self.model_dump().items() if v is not None}
 
 
 class PredictRequest(BaseModel):

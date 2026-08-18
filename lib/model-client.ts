@@ -60,25 +60,28 @@ const REQUEST_TIMEOUT_MS = 30_000;
  * caller, and matches the defaults predict.py would impute anyway.
  */
 function normalize(row: BehaviorRow): Record<string, unknown> {
-  return {
-    device_type: row.device_type ?? 'unknown',
-    click_events: row.click_events ?? 0,
-    scroll_events: row.scroll_events ?? 0,
-    touch_events: row.touch_events ?? 0,
-    keyboard_events: row.keyboard_events ?? 0,
-    device_motion: row.device_motion ?? 0,
-    time_on_page: row.time_on_page ?? 0,
-    screen_size: row.screen_size ?? 'unknown',
-    browser_info: row.browser_info ?? 'unknown',
-    language: row.language ?? 'unknown',
-    timezone_offset: row.timezone_offset ?? 0,
-    device_orientation: row.device_orientation ?? 'unknown',
-    geolocation_city: row.geolocation_city ?? 'unknown',
-    // Negative amounts are rejected by the API and were never in training.
-    transaction_amount: Math.max(0, Number(row.transaction_amount ?? 0)),
-    transaction_date: row.transaction_date ?? new Date().toISOString().replace('T', ' ').slice(0, 19),
-    mouse_movement: row.mouse_movement ?? 0,
-  };
+  const out: Record<string, unknown> = {};
+
+  // Absent fields are OMITTED, not defaulted. predict.py imputes missing
+  // columns from the training distribution, which is the honest treatment of
+  // "we did not observe this". Filling zeroes would instead assert that the
+  // user clicked nothing, moved nothing and spent no time on the page -- a
+  // profile that looks like a bot, and which the model correctly flags. That
+  // is how an endpoint with no behavioural data ends up scoring everything
+  // High.
+  //
+  // Nulls are dropped for the same reason: the database columns are nullable
+  // but the API schema is not, and a null is an absence, not a zero.
+  for (const [key, value] of Object.entries(row)) {
+    if (value !== undefined && value !== null) out[key] = value;
+  }
+
+  if (row.transaction_amount !== undefined && row.transaction_amount !== null) {
+    // Negative amounts are rejected by the API and never appeared in training.
+    out.transaction_amount = Math.max(0, Number(row.transaction_amount));
+  }
+
+  return out;
 }
 
 async function scoreViaApi(
